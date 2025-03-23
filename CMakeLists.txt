@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(CasadiExample)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 # Путь к директории CasADi 
 set(CASADI_DIR $ENV{USERPROFILE}/AppData/Local/Programs/Python/Python313/Lib/site-packages/casadi)

@@ -1,0 +1,42 @@
+# Папка сборки
+build/
+**/build/
+
+# Файлы CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# Скомпилированные файлы
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.obj
+*.o
+*.out
+
+# Временные файлы
+*.log
+*.tlog
+*.ilk
+*.pdb
+*.idb
+*.suo
+*.user
+*.sdf
+*.opensdf
+
+# Файлы IDE
+.vs/
+.vscode/
+*.swp
+*~
+
+# Зависимости и бинарные файлы
+/bin/
+/lib/

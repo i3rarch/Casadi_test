@@ -73,6 +73,134 @@ std::pair<DMDict, double> solve_with_solver(const std::string& solver_name,
     return {res, elapsed.count()};
 }
 
+// Функция для решения динамической системы методом Рунге-Кутты
+void solve_dynamic_system() {
+    std::cout << "\n=== Решение динамической системы ===" << std::endl;
+    
+    // Определяем символьные переменные
+    MX x = MX::sym("x", 2);  // Состояние системы (позиция и скорость)
+    MX u = MX::sym("u");     // Управляющее воздействие
+    MX p = MX::sym("p");     // Параметры системы
+    
+    // Определяем простую динамическую систему: маятник с управлением
+    // ẋ₀ = x₁
+    // ẋ₁ = -p*sin(x₀) + u
+    MX ode = MX::vertcat({
+        x(1),
+        -p*sin(x(0)) + u
+    });
+    
+    // Создаем функцию описывающую правую часть ОДУ
+    Function f = Function("f", {x, u, p}, {ode});
+    
+    // Параметры интегрирования
+    double t0 = 0;       // Начальное время
+    double tf = 10;      // Конечное время
+    int N = 100;         // Количество шагов
+    double dt = (tf-t0)/N; // Шаг по времени
+    
+    // Создаем интегратор
+    Dict integrator_options;
+    integrator_options["tf"] = dt;         // Шаг интегрирования
+    integrator_options["simplify"] = true; // Упрощать выражения
+    
+    Function integrator = casadi::integrator("integrator", "rk", 
+                            {{"x", x}, {"p", MX::vertcat({u, p})}, {"ode", ode}},
+                            integrator_options);
+    
+    // Начальные условия и параметры
+    std::vector<double> x0_val = {M_PI/4, 0.0}; // Начальное отклонение и нулевая скорость
+    double p_val = 1.0;                         // Коэффициент жесткости
+    
+    // Векторы для хранения результатов
+    std::vector<double> t_result(N+1);
+    std::vector<std::vector<double>> x_result(2, std::vector<double>(N+1));
+    std::vector<double> u_result(N+1);
+    
+    // Начальные значения
+    t_result[0] = t0;
+    x_result[0][0] = x0_val[0];
+    x_result[1][0] = x0_val[1];
+    
+    // Простая стратегия управления: u = -K*x (линейная обратная связь)
+    double K_p = 3.0;  // Коэффициент пропорционального усиления позиции 
+    double K_v = 1.0;  // Коэффициент усиления скорости
+    
+    // Текущее состояние системы
+    DM x_current = DM(x0_val);
+    
+    std::cout << "Моделирование маятника с линейной обратной связью" << std::endl;
+    std::cout << "Начальное отклонение: " << x0_val[0] << " рад (" 
+              << x0_val[0] * 180/M_PI << "°)" << std::endl;
+    std::cout << "Коэффициенты управления: K_p = " << K_p << ", K_v = " << K_v << std::endl;
+    
+    // Интегрирование системы
+    for (int i = 0; i < N; ++i) {
+        // Вычисляем управление (обратная связь)
+        double u_val = -K_p * x_current(0).scalar() - K_v * x_current(1).scalar();
+        u_result[i] = u_val;
+        
+        // Интегрируем один шаг
+        DMDict res = integrator(DMDict{{"x0", x_current}, {"p", DM::vertcat({DM(u_val), DM(p_val)})}});
+        x_current = res.at("xf");
+        
+        // Сохраняем результаты
+        t_result[i+1] = t0 + (i+1)*dt;
+        x_result[0][i+1] = x_current(0).scalar();
+        x_result[1][i+1] = x_current(1).scalar();
+    }
+    
+    // Выводим результаты в табличном виде
+    std::cout << "\nРезультаты моделирования (выборочные точки):" << std::endl;
+    std::cout << std::left 
+              << std::setw(10) << "Время" 
+              << std::setw(15) << "Положение" 
+              << std::setw(15) << "Скорость" 
+              << std::setw(15) << "Управление" << std::endl;
+    std::cout << std::string(55, '-') << std::endl;
+    
+    // Выводим только 10 точек для наглядности
+    int step = N / 10;
+    for (int i = 0; i <= N; i += step) {
+        std::cout << std::fixed << std::setprecision(4)
+                  << std::setw(10) << t_result[i] 
+                  << std::setw(15) << x_result[0][i] 
+                  << std::setw(15) << x_result[1][i];
+        
+        if (i < N) {
+            std::cout << std::setw(15) << u_result[i];
+        }
+        std::cout << std::endl;
+    }
+    
+    // Анализ результатов
+    double max_pos = *std::max_element(x_result[0].begin(), x_result[0].end(), 
+                         [](double a, double b) { return std::abs(a) < std::abs(b); });
+    double max_vel = *std::max_element(x_result[1].begin(), x_result[1].end(), 
+                         [](double a, double b) { return std::abs(a) < std::abs(b); });
+    double max_control = *std::max_element(u_result.begin(), u_result.end(), 
+                         [](double a, double b) { return std::abs(a) < std::abs(b); });
+    
+    std::cout << "\nАнализ результатов:" << std::endl;
+    std::cout << "Максимальное отклонение: " << std::abs(max_pos) << " рад" << std::endl;
+    std::cout << "Максимальная скорость: " << std::abs(max_vel) << " рад/с" << std::endl;
+    std::cout << "Максимальное управляющее воздействие: " << std::abs(max_control) << std::endl;
+    
+    // Проверка условия затухания колебаний
+    double final_pos = std::abs(x_result[0][N]);
+    double final_vel = std::abs(x_result[1][N]);
+    
+    std::cout << "\nПроверка на затухание колебаний:" << std::endl;
+    std::cout << "Конечное отклонение: " << final_pos << " рад" << std::endl;
+    std::cout << "Конечная скорость: " << final_vel << " рад/с" << std::endl;
+    
+    if (final_pos < 0.01 && final_vel < 0.01) {
+        std::cout << "Вывод: Система успешно стабилизирована ✓" << std::endl;
+    } else {
+        std::cout << "Вывод: Система не достигла устойчивого положения ✗" << std::endl;
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     
@@ -269,6 +397,7 @@ int main() {
               << (g_opt(2).scalar() <= 1e-6 ? "Выполнено ✓" : "Не выполнено ✗") 
               << (is_active_ineq2 ? " (активное)" : " (неактивное)") << std::endl;
     
+    solve_dynamic_system();
     
     return 0;
 }

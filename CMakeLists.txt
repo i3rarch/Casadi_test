@@ -7,7 +7,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CASADI_DIR $ENV{USERPROFILE}/AppData/Local/Programs/Python/Python313/Lib/site-packages/casadi)
 
 # Добавляем исполняемый файл
-add_executable(casadi_example main.cpp)
+add_executable(casadi_example 
+    main.cpp
+    TrajectoryOptimizer.cpp
+)
 
 # Подключаем заголовочные файлы CasADi
 target_include_directories(casadi_example PRIVATE ${CASADI_DIR}/include)

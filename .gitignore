@@ -1,5 +1,6 @@
 # Папка сборки
 build/
+buildD/
 **/build/
 
 # Файлы CMake

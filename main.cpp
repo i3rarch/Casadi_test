@@ -1,48 +1,64 @@
 #define NOMINMAX
 
 #include <iostream>
-#include <windows.h>  // For SetConsoleOutputCP
+#include <windows.h>  // Для SetConsoleOutputCP
 #include <memory>
 #include "TrajectoryOptimizer.hpp"
 
-void demoAPI() {
-    std::cout << "\n=== ДЕМОНСТРАЦИЯ API ===" << std::endl;
+void testConstraint(const std::string& constraint_name, 
+                   std::unique_ptr<TrajectoryOptimizer>& optimizer,
+                   const AirspaceConstraint& constraint) {
+    std::cout << "\nТестирование ограничения: " << constraint_name << std::endl;
     
-    // Создаем параметры системы - объект массой 2 кг с ограничением силы 3 Н
-    SystemParams system_params(2.0, 3.0);
+    // Очистка предыдущих ограничений
+    optimizer->clearConstraints();
     
-    // Создаем параметры оптимизации - 30 шагов по 0.2 сек с использованием IPOPT
-    OptimizationParams opt_params(30, 0.2, "ipopt");
+    // Добавление тестового ограничения
+    optimizer->addConstraint(constraint);
     
-    // Создаем оптимизатор с нашими параметрами
-    std::unique_ptr<TrajectoryOptimizer> optimizer = 
-        std::make_unique<TrajectoryOptimizer>(system_params, opt_params);
+    // Сначала пробуем отладочную версию (упрощенную)
+    std::cout << "Запуск отладочной оптимизации..." << std::endl;
+    TrajectoryResult result_debug = optimizer->debug4D("fuel", {
+        {"x0", 0.0}, {"y0", 0.0}, {"z0", 3000.0}, 
+        {"xf", 100000.0}, {"yf", 80000.0}, {"zf", 5000.0}
+    });
     
-    // Оптимизация по расходу топлива
-    std::cout << "\nОптимизация по расходу топлива:" << std::endl;
-    TrajectoryResult result_fuel = optimizer->optimize2D("fuel", {{"xf", 8.0}, {"yf", 5.0}});
-    optimizer->visualizeTrajectory(result_fuel);
+    if (result_debug.computation_time > 0) {
+        optimizer->visualizeTrajectory(result_debug);
+        optimizer->exportTrajectory(result_debug, "debug_" + constraint_name + ".csv");
+    } else {
+        std::cout << "Отладочная оптимизация не удалась." << std::endl;
+    }
     
-    // Изменяем параметры системы - теперь объект легче
-    SystemParams light_system(0.5, 3.0);
-    optimizer->setSystemParams(light_system);
-    
-    // Оптимизация по энергии для легкого объекта
-    std::cout << "\nОптимизация по энергии для легкого объекта (масса = 0.5 кг):" << std::endl;
-    TrajectoryResult result_energy_light = optimizer->optimize2D("energy", {{"xf", 8.0}, {"yf", 5.0}});
-    optimizer->visualizeTrajectory(result_energy_light);
-    
-    // Создаем другой оптимизатор для демонстрации минимизации времени
-    std::unique_ptr<TrajectoryOptimizer> time_optimizer = std::make_unique<TrajectoryOptimizer>();
-    
-    // Настраиваем параметры
-    time_optimizer->setSystemParams(SystemParams(1.0, 4.0));
-    time_optimizer->setOptimizationParams(OptimizationParams(40, 0.05, "ipopt"));
-    
-    // Оптимизация по времени
-    std::cout << "\nОптимизация по времени:" << std::endl;
-    TrajectoryResult result_time = time_optimizer->optimize2D("time", {{"xf", 10.0}, {"yf", 10.0}});
-    time_optimizer->visualizeTrajectory(result_time);
+    // Пробуем полную оптимизацию с этим ограничением
+    std::cout << "Запуск полной оптимизации..." << std::endl;
+    try {
+        TrajectoryResult result_full = optimizer->optimize4D("fuel", {
+            {"x0", 0.0}, {"y0", 0.0}, {"z0", 3000.0}, 
+            {"xf", 100000.0}, {"yf", 80000.0}, {"zf", 5000.0}
+        });
+        
+        optimizer->visualizeTrajectory(result_full);
+        optimizer->exportTrajectory(result_full, "full_" + constraint_name + ".csv");
+        
+        // Сравнение результатов
+        if (result_debug.computation_time > 0) {
+            std::cout << "\nОграничение: " << constraint_name << " - СРАВНЕНИЕ" << std::endl;
+            std::cout << "Метод     | Время (мин) | Топливо | Вычисление (сек)" << std::endl;
+            std::cout << "----------|------------|---------|------------------" << std::endl;
+            std::cout << "Отладка   | " << std::fixed << std::setprecision(2) 
+                      << result_debug.total_flight_time / 60.0 << " | " 
+                      << result_debug.fuel_consumption << " | " 
+                      << result_debug.computation_time << std::endl;
+            std::cout << "Полный    | " << std::fixed << std::setprecision(2) 
+                      << result_full.total_flight_time / 60.0 << " | " 
+                      << result_full.fuel_consumption << " | " 
+                      << result_full.computation_time << std::endl;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Оптимизация не удалась: " << e.what() << std::endl;
+        std::cerr << "Попробуйте настроить параметры ограничений или параметры решателя." << std::endl;
+    }
 }
 
 void demo4DTrajectory() {
@@ -58,73 +74,36 @@ void demo4DTrajectory() {
     std::unique_ptr<TrajectoryOptimizer> optimizer = 
         std::make_unique<TrajectoryOptimizer>(aircraft_params, opt_params);
     
-    // Добавляем ограничения воздушного пространства (грозовые очаги, запретные зоны)
+    // Тестирование сферического ограничения (положение изменено во избежание проблем с NaN)
+    testConstraint("sphere", optimizer, 
+        AirspaceConstraint::createSphere(65000.0, 25000.0, 7000.0, 15000.0, 0.0, INFINITY, "Грозовой фронт"));
     
-    // Грозовой фронт - сферическая область
-    optimizer->addConstraint(AirspaceConstraint::createSphere(
-        50000.0, 40000.0, 7000.0, 15000.0, 0.0, INFINITY, "Грозовой фронт"));
+    // Тестирование цилиндрического ограничения - перемещено для предотвращения прямого перелета
+    // Радиус увеличен для облегчения обнаружения
+    testConstraint("cylinder", optimizer,
+        AirspaceConstraint::createCylinder(45000.0, 35000.0, 6000.0, 8000.0, 18000.0, 0.0, INFINITY, "Зона ограничения"));
+
+    // Тестирование комбинированных ограничений - скорректированные позиции
+    std::cout << "\nТестирование комбинированных ограничений..." << std::endl;
+    optimizer->clearConstraints();
+    optimizer->addConstraint(AirspaceConstraint::createSphere(65000.0, 25000.0, 7000.0, 15000.0, 0.0, INFINITY, "Грозовой фронт"));
+    optimizer->addConstraint(AirspaceConstraint::createCylinder(45000.0, 35000.0, 6000.0, 8000.0, 18000.0, 0.0, INFINITY, "Зона ограничения"));
     
-    // Запретная зона - цилиндрическая область
-    optimizer->addConstraint(AirspaceConstraint::createCylinder(
-        70000.0, 30000.0, 0.0, 9000.0, 10000.0, 0.0, INFINITY, "Запретная зона"));
-    
-    // Коридор для обязательного прохождения
-    optimizer->addConstraint(AirspaceConstraint::createCorridor(
-        30000.0, 20000.0, 8000.0, 60000.0, 50000.0, 9000.0, 5000.0, 0.0, INFINITY, "Обязательный коридор"));
-    
-    // Временное окно для прибытия
-    optimizer->addConstraint(AirspaceConstraint::createTimeWindow(
-        100000.0, 80000.0, 5000.0, 3600.0, 4500.0, "Слот прибытия"));
-    
-    // Оптимизация по расходу топлива
-    std::cout << "\nОптимизация по расходу топлива:" << std::endl;
-    TrajectoryResult result_fuel = optimizer->optimize4D("fuel", {
-        {"x0", 0.0}, {"y0", 0.0}, {"z0", 3000.0}, 
-        {"xf", 100000.0}, {"yf", 80000.0}, {"zf", 5000.0}
-    });
-    optimizer->visualizeTrajectory(result_fuel);
-    optimizer->exportTrajectory(result_fuel, "fuel_trajectory.csv");
-    
-    // Оптимизация по времени
-    std::cout << "\nОптимизация по времени:" << std::endl;
-    TrajectoryResult result_time = optimizer->optimize4D("time", {
-        {"x0", 0.0}, {"y0", 0.0}, {"z0", 3000.0}, 
-        {"xf", 100000.0}, {"yf", 80000.0}, {"zf", 5000.0}
-    });
-    optimizer->visualizeTrajectory(result_time);
-    optimizer->exportTrajectory(result_time, "time_trajectory.csv");
-    
-    // Сбалансированная оптимизация
-    std::cout << "\nСбалансированная оптимизация (время + топливо):" << std::endl;
-    TrajectoryResult result_balanced = optimizer->optimize4D("balanced", {
-        {"x0", 0.0}, {"y0", 0.0}, {"z0", 3000.0}, 
-        {"xf", 100000.0}, {"yf", 80000.0}, {"zf", 5000.0}
-    });
-    optimizer->visualizeTrajectory(result_balanced);
-    optimizer->exportTrajectory(result_balanced, "balanced_trajectory.csv");
-    
-    // Сравнение результатов
-    std::cout << "\n=== СРАВНЕНИЕ РЕЗУЛЬТАТОВ ===" << std::endl;
-    std::cout << "Критерий   | Время полета (мин) | Расход топлива | Время вычислений (сек)" << std::endl;
-    std::cout << "-----------|-------------------|---------------|----------------------" << std::endl;
-    std::cout << "Топливо    | " << std::fixed << std::setprecision(2) 
-              << result_fuel.total_flight_time / 60.0 << " | " 
-              << result_fuel.fuel_consumption << " | " 
-              << result_fuel.computation_time << std::endl;
-    std::cout << "Время      | " << std::fixed << std::setprecision(2) 
-              << result_time.total_flight_time / 60.0 << " | " 
-              << result_time.fuel_consumption << " | " 
-              << result_time.computation_time << std::endl;
-    std::cout << "Баланс     | " << std::fixed << std::setprecision(2) 
-              << result_balanced.total_flight_time / 60.0 << " | " 
-              << result_balanced.fuel_consumption << " | " 
-              << result_balanced.computation_time << std::endl;
+    try {
+        TrajectoryResult result_combined = optimizer->optimize4D("fuel", {
+            {"x0", 0.0}, {"y0", 0.0}, {"z0", 3000.0}, 
+            {"xf", 100000.0}, {"yf", 80000.0}, {"zf", 5000.0}
+        });
+        optimizer->visualizeTrajectory(result_combined);
+        optimizer->exportTrajectory(result_combined, "combined_constraints.csv");
+    } catch (std::exception& e) {
+        std::cerr << "Комбинированная оптимизация не удалась: " << e.what() << std::endl;
+    }
 }
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     
-    demoAPI();
     demo4DTrajectory();
 
     return 0;

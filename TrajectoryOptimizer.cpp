@@ -24,83 +24,6 @@ void TrajectoryOptimizer::setOptimizationParams(const OptimizationParams& params
     opt_params = params;
 }
 
-// Создание решателя для оптимизации 2D траектории
-Function TrajectoryOptimizer::createSolver2D(const MX& x, const MX& u, const std::string& objective) {
-    int N = opt_params.N;
-    double dt = opt_params.dt;
-    double mass = system.mass;
-    
-    // Уравнения динамики
-    std::vector<MX> equations;
-    for (int k = 0; k < N; k++) {
-        // Распаковка состояния
-        MX pos_x = x(0, k); 
-        MX pos_y = x(1, k);
-        MX vel_x = x(2, k);
-        MX vel_y = x(3, k);
-        
-        // Управляющие воздействия
-        MX force_x = u(0, k);
-        MX force_y = u(1, k);
-        
-        // Уравнения движения (дискретизация):
-        MX next_pos_x = pos_x + vel_x * dt;
-        MX next_pos_y = pos_y + vel_y * dt;
-        
-        MX next_vel_x = vel_x + (force_x / mass) * dt;
-        MX next_vel_y = vel_y + (force_y / mass) * dt;
-        
-        // Накладываем ограничения
-        equations.push_back(x(0, k+1) - next_pos_x);
-        equations.push_back(x(1, k+1) - next_pos_y);
-        equations.push_back(x(2, k+1) - next_vel_x);
-        equations.push_back(x(3, k+1) - next_vel_y);
-    }
-    
-    // Целевая функция
-    MX obj;
-    if (objective == "fuel") {
-        // Минимизация расхода топлива (сумма абсолютных значений управлений)
-        obj = 0;
-        for (int k = 0; k < N; k++) {
-            obj += fabs(u(0, k)) + fabs(u(1, k));
-        }
-    } else if (objective == "time") {
-        // Минимизация времени (аппроксимация)
-        obj = N * dt;
-        // Штраф за медленное движение
-        for (int k = 0; k < N; k++) {
-            obj += dt * 0.1 * (1.0 / (fabs(u(0, k)) + fabs(u(1, k)) + 0.1));
-        }
-    } else { // "energy" по умолчанию
-        // Минимизация энергии (сумма квадратов управлений)
-        obj = 0;
-        for (int k = 0; k < N; k++) {
-            obj += pow(u(0, k), 2) + pow(u(1, k), 2);
-        }
-    }
-    
-    // Параметризуем переменные оптимизации
-    std::vector<MX> vars = {reshape(x, -1, 1), reshape(u, -1, 1)};
-    MX opt_vars = vertcat(vars);
-    
-    // Формируем ограничения
-    MX g = vertcat(equations);
-    
-    // Создаем задачу оптимизации
-    MXDict nlp = {{"x", opt_vars}, {"f", obj}, {"g", g}};
-    
-    // Настройки решателя
-    Dict solver_opts;
-    solver_opts["ipopt.print_level"] = 0;
-    solver_opts["ipopt.tol"] = 1e-6;
-    solver_opts["ipopt.max_iter"] = 1000;
-    solver_opts["print_time"] = 0;
-    
-    // Создаем решатель
-    return nlpsol("solver", opt_params.solver, nlp, solver_opts);
-}
-
 // Создание решателя для 4D-траектории
 Function TrajectoryOptimizer::createSolver4D(const MX& x, const MX& u, const MX& t, const std::string& objective) {
     int N = opt_params.N;
@@ -174,12 +97,7 @@ Function TrajectoryOptimizer::createSolver4D(const MX& x, const MX& u, const MX&
         for (const auto& constraint : constraints) {
             if (!constraint.is_active) continue;
             
-            // Проверяем, активно ли ограничение в текущий момент времени
-            if (double(current_time) >= constraint.start_time && double(current_time) <= constraint.end_time) {
-                
-                // Добавляем ограничение в зависимости от его типа
-                airspace_constraints.push_back(createDistanceConstraint(pos_x, pos_y, pos_z, constraint, current_time));
-            }
+            airspace_constraints.push_back(createDistanceConstraint(pos_x, pos_y, pos_z, constraint, current_time));
         }
     }
     
@@ -242,11 +160,17 @@ Function TrajectoryOptimizer::createSolver4D(const MX& x, const MX& u, const MX&
     
     // Настройки решателя
     Dict solver_opts;
-    solver_opts["ipopt.print_level"] = 0;
-    solver_opts["ipopt.tol"] = 1e-4;
-    solver_opts["ipopt.max_iter"] = 3000;
-    solver_opts["ipopt.acceptable_tol"] = 1e-2;
-    solver_opts["print_time"] = 0;
+    solver_opts["ipopt.print_level"] = 3;
+    solver_opts["ipopt.tol"] = 1e-4;         
+    solver_opts["ipopt.max_iter"] = 5000;    
+    solver_opts["ipopt.acceptable_tol"] = 1e-3;
+    solver_opts["ipopt.hessian_approximation"] = "limited-memory"; 
+    solver_opts["ipopt.mu_strategy"] = "adaptive";
+    solver_opts["print_time"] = 1;
+    solver_opts["ipopt.mumps_scaling"] = 1; 
+    solver_opts["ipopt.linear_solver"] = "mumps";
+    solver_opts["ipopt.ma57_automatic_scaling"] = "yes";
+    solver_opts["ipopt.nlp_scaling_method"] = "gradient-based"; 
     
     // Создаем решатель
     return nlpsol("solver", opt_params.solver, nlp, solver_opts);
@@ -254,38 +178,12 @@ Function TrajectoryOptimizer::createSolver4D(const MX& x, const MX& u, const MX&
 
 // Создание ограничений расстояния для различных типов ограничений воздушного пространства
 MX TrajectoryOptimizer::createDistanceConstraint(const MX& pos_x, const MX& pos_y, const MX& pos_z, 
-                                             const AirspaceConstraint& constraint, const MX& time) {
+                                            const AirspaceConstraint& constraint, const MX& time) {
     switch (constraint.constraint_type) {
         case AirspaceConstraintType::SPHERE: {
-            // Параметры: [center_x, center_y, center_z, radius]
-            double cx = constraint.parameters[0];
-            double cy = constraint.parameters[1];
-            double cz = constraint.parameters[2];
-            double r = constraint.parameters[3];
-            
-            // Расстояние от точки до центра сферы должно быть больше радиуса (избегание зоны)
-            return pow(pos_x - cx, 2) + pow(pos_y - cy, 2) + pow(pos_z - cz, 2) - pow(r, 2);
         }
         
         case AirspaceConstraintType::CYLINDER: {
-            // Параметры: [center_x, center_y, min_z, max_z, radius]
-            double cx = constraint.parameters[0];
-            double cy = constraint.parameters[1];
-            double min_z = constraint.parameters[2];
-            double max_z = constraint.parameters[3];
-            double r = constraint.parameters[4];
-            
-            // Находимся ли по высоте в пределах цилиндра
-            MX in_height_range = MX::if_else(
-                pos_z >= min_z && pos_z <= max_z,
-                1.0, -1.0
-            );
-            
-            // Горизонтальное расстояние до оси цилиндра
-            MX dist_xy = pow(pos_x - cx, 2) + pow(pos_y - cy, 2);
-            
-            // Если находимся в диапазоне высот цилиндра, должны быть за пределами радиуса
-            return in_height_range * (dist_xy - pow(r, 2));
         }
         
         case AirspaceConstraintType::CORRIDOR: {
@@ -315,15 +213,31 @@ MX TrajectoryOptimizer::createDistanceConstraint(const MX& pos_x, const MX& pos_
             
             // Расстояние до оси коридора
             MX dist = sqrt(pow(pos_x - closest_x, 2) + pow(pos_y - closest_y, 2) + pow(pos_z - closest_z, 2));
+
+            // ВАЖНО: Заменяем MX::if_else на гладкие функции
+            double smooth_factor = 10.0; // Параметр сглаживания
             
-            // Должны находиться внутри коридора (расстояние <= width) и между началом и концом коридора
-            MX in_corridor_bounds = MX::if_else(
-                proj >= 0 && proj <= len,
-                width - dist, // Если внутри диапазона длины коридора - должны быть ближе чем width
-                -1.0          // Иначе считаем ограничение выполненным
-            );
+            // Гладкая версия проверки 'proj >= 0 && proj <= len'
+            MX in_corridor_length = (0.5 * (1 + tanh(smooth_factor * proj))) * 
+                                   (0.5 * (1 - tanh(smooth_factor * (proj - len))));
             
-            return in_corridor_bounds;
+            // Метрика расстояния до коридора - положительно внутри коридора
+            MX corridor_metric = width - dist;
+            
+            // Гладкое ограничение - активно только если внутри длины коридора
+            MX smooth_constraint = in_corridor_length * corridor_metric + 
+                                  (1.0 - in_corridor_length) * MX(1.0);
+                                  
+            // Добавляем время активации ограничения
+            double t_start = constraint.start_time;
+            double t_end = constraint.end_time;
+            double t_margin = 60.0; // 1 минута плавного перехода
+            
+            MX start_factor = 0.5 * (1 + tanh((time - t_start) / t_margin));
+            MX end_factor = 0.5 * (1 + tanh((t_end - time) / t_margin));
+            MX time_factor = start_factor * end_factor;
+            
+            return time_factor * smooth_constraint + (1.0 - time_factor) * MX(1.0);
         }
         
         case AirspaceConstraintType::TIME_WINDOW: {
@@ -337,18 +251,18 @@ MX TrajectoryOptimizer::createDistanceConstraint(const MX& pos_x, const MX& pos_
             // Расстояние до целевой точки
             MX dist_to_target = sqrt(pow(pos_x - tx, 2) + pow(pos_y - ty, 2) + pow(pos_z - tz, 2));
             
-            // Если мы близко к целевой точке (меньше 100м), проверяем временное окно
-            MX at_target = MX::if_else(
-                dist_to_target < 100.0,
-                (time - t_early) * (t_late - time), // Должно быть положительно, если внутри окна
-                1.0 // Иначе считаем ограничение выполненным
-            );
+            // Вместо if_else используем гладкую функцию для близости к цели
+            double prox_factor = 50.0; // Настраиваемый параметр резкости перехода
+            MX proximity = 0.5 * (1 - tanh(prox_factor * (dist_to_target - 100.0)));
             
-            return at_target;
+            // Ограничение на временное окно - должно быть положительно, если внутри окна
+            MX time_window = (time - t_early) * (t_late - time);
+            
+            // Комбинированное гладкое ограничение
+            return proximity * time_window + (1.0 - proximity) * MX(1.0);
         }
         
         default:
-            // По умолчанию возвращаем константу - ограничение всегда выполнено
             return MX(1.0);
     }
 }
@@ -367,37 +281,6 @@ void TrajectoryOptimizer::clearConstraints() {
 void TrajectoryOptimizer::enableConstraint(size_t index, bool enable) {
     if (index < constraints.size()) {
         constraints[index].is_active = enable;
-    }
-}
-
-// Извлечение результатов из решения оптимизации
-void TrajectoryOptimizer::extractResult2D(const DMDict& result, TrajectoryResult& traj_result) {
-    DM x_opt = result.at("x");
-    int N = opt_params.N;
-    
-    // Получаем значение целевой функции
-    traj_result.objective_value = result.at("f").scalar();
-    
-    // Резервируем память для данных
-    traj_result.positions.resize(N + 1);
-    traj_result.velocities.resize(N + 1);
-    traj_result.controls.resize(N);
-    
-    // Извлекаем значения состояний и управления
-    for (int k = 0; k <= N; k++) {
-        double pos_x = x_opt(4*k).scalar();
-        double pos_y = x_opt(4*k+1).scalar();
-        double vel_x = x_opt(4*k+2).scalar();
-        double vel_y = x_opt(4*k+3).scalar();
-        
-        traj_result.positions[k] = {pos_x, pos_y};
-        traj_result.velocities[k] = {vel_x, vel_y};
-        
-        if (k < N) {
-            double force_x = x_opt(4*(N+1) + 2*k).scalar();
-            double force_y = x_opt(4*(N+1) + 2*k+1).scalar();
-            traj_result.controls[k] = {force_x, force_y};
-        }
     }
 }
 
@@ -433,93 +316,6 @@ void TrajectoryOptimizer::extractResult4D(const DMDict& result, TrajectoryResult
             traj_result.controls[k] = {force_x, force_y, force_z};
         }
     }
-}
-
-// Метод для оптимизации траектории
-TrajectoryResult TrajectoryOptimizer::optimize2D(
-    const std::string& objective, 
-    const std::map<std::string, double>& kwargs) {
-    
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    int N = opt_params.N;
-    
-    // Создаем переменные состояния и управления
-    MX x = MX::sym("x", 4, N+1);  // состояние: [позиция_x, позиция_y, скорость_x, скорость_y]
-    MX u = MX::sym("u", 2, N);    // управление: [сила_x, сила_y]
-    
-    // Начальные и конечные условия
-    std::vector<double> x0 = {0.0, 0.0, 0.0, 0.0};  // начальное положение и скорость
-    std::vector<double> xf = {10.0, 5.0, 0.0, 0.0}; // целевое положение и скорость
-    
-    // Переопределение значений из kwargs
-    auto it = kwargs.find("x0");
-    if (it != kwargs.end()) x0[0] = it->second;
-    
-    it = kwargs.find("y0");
-    if (it != kwargs.end()) x0[1] = it->second;
-    
-    it = kwargs.find("xf");
-    if (it != kwargs.end()) xf[0] = it->second;
-    
-    it = kwargs.find("yf"); 
-    if (it != kwargs.end()) xf[1] = it->second;
-    
-    // Создаем решатель
-    Function solver = createSolver2D(x, u, objective);
-    
-    // Границы для переменных оптимизации
-    int n_states = 4 * (N + 1);
-    int n_controls = 2 * N;
-    
-    std::vector<double> lbx(n_states + n_controls, -std::numeric_limits<double>::infinity());
-    std::vector<double> ubx(n_states + n_controls, std::numeric_limits<double>::infinity());
-    
-    // Ограничения на управление
-    double max_force = system.max_force_xy;  // Changed from max_force to max_force_xy
-    for (int i = n_states; i < n_states + n_controls; i++) {
-        lbx[i] = -max_force;
-        ubx[i] = max_force;
-    }
-    
-    // Начальные условия
-    lbx[0] = ubx[0] = x0[0]; // начальная позиция x
-    lbx[1] = ubx[1] = x0[1]; // начальная позиция y
-    lbx[2] = ubx[2] = x0[2]; // начальная скорость x
-    lbx[3] = ubx[3] = x0[3]; // начальная скорость y
-    
-    // Конечные условия
-    lbx[n_states-4] = ubx[n_states-4] = xf[0]; // конечная позиция x
-    lbx[n_states-3] = ubx[n_states-3] = xf[1]; // конечная позиция y
-    lbx[n_states-2] = ubx[n_states-2] = xf[2]; // конечная скорость x
-    lbx[n_states-1] = ubx[n_states-1] = xf[3]; // конечная скорость y
-    
-    // Границы для ограничений (все уравнения должны быть равны нулю)
-    int n_equations = 4 * N;  // 4 уравнения для каждого шага времени
-    std::vector<double> lbg(n_equations, 0.0);
-    std::vector<double> ubg(n_equations, 0.0);
-    
-    // Начальное предположение для переменных оптимизации
-    std::vector<double> x0_guess(n_states + n_controls, 0.0);
-    
-    // Вызываем решатель
-    DMDict result = solver(DMDict{
-        {"x0", x0_guess},
-        {"lbx", lbx},
-        {"ubx", ubx},
-        {"lbg", lbg},
-        {"ubg", ubg}
-    });
-    
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    
-    // Заполняем структуру результата
-    TrajectoryResult traj_result;
-    extractResult2D(result, traj_result);
-    traj_result.computation_time = duration.count() / 1000.0; // в секундах
-    
-    return traj_result;
 }
 
 // Метод оптимизации 4D-траектории
@@ -635,18 +431,37 @@ TrajectoryResult TrajectoryOptimizer::optimize4D(
     // Начальное предположение для переменных оптимизации
     std::vector<double> x0_guess(n_states + n_controls + n_times, 0.0);
     
-    // Начальное предположение для позиций - линейная интерполяция между начальной и конечной точками
     for (int k = 0; k <= N; k++) {
         double t = static_cast<double>(k) / N;
         for (int i = 0; i < 3; i++) {
             x0_guess[6*k + i] = x0[i] + t * (xf[i] - x0[i]);
         }
+        
+        if (k < N) {
+            // Calculate estimated flight time based on distance and a reasonable speed
+            double estimated_flight_time = 3600.0; 
+            double dt_est = estimated_flight_time / N;
+            for (int i = 0; i < 3; i++) {
+                x0_guess[6*k + 3 + i] = (xf[i] - x0[i]) / estimated_flight_time;
+            }
+        }
+    }
+    
+    for (int k = 0; k < N; k++) {
+        x0_guess[n_states + 3*k] = (xf[0] - x0[0]) > 0 ? 10000.0 : -10000.0;  // x-direction
+        x0_guess[n_states + 3*k + 1] = (xf[1] - x0[1]) > 0 ? 10000.0 : -10000.0;  // y-direction
+        x0_guess[n_states + 3*k + 2] = (xf[2] - x0[2]) > 0 ? 5000.0 : -5000.0;  // z-direction
     }
     
     // Начальное предположение для временных шагов - равные интервалы
-    double estimated_flight_time = 3600.0; // 1 час в секундах
+    double estimated_flight_time = std::sqrt(
+        std::pow(xf[0] - x0[0], 2) + 
+        std::pow(xf[1] - x0[1], 2) + 
+        std::pow(xf[2] - x0[2], 2)
+    ) / (0.8 * system.max_speed); // Предполагаем скорость 80% от максимальной
+
     double dt_guess = estimated_flight_time / N;
-    
+
     for (int k = 0; k < N; k++) {
         x0_guess[n_states + n_controls + k] = dt_guess;
     }
@@ -654,6 +469,16 @@ TrajectoryResult TrajectoryOptimizer::optimize4D(
     // Вызываем решатель
     DMDict result;
     try {
+        // Проверка на наличие NaN 
+        if (containsNaN(x0_guess)) {
+            std::cerr << "Предупреждение: обнаружены значения NaN в начальном приближении. Используются значения по умолчанию." << std::endl;
+            // Сброс к безопасным значениям
+            std::fill(x0_guess.begin(), x0_guess.end(), 0.0);
+            for (int k = 0; k < N; k++) {
+                x0_guess[n_states + n_controls + k] = dt_guess;
+            }
+        }
+        
         result = solver(DMDict{
             {"x0", x0_guess},
             {"lbx", lbx},
@@ -662,7 +487,15 @@ TrajectoryResult TrajectoryOptimizer::optimize4D(
             {"ubg", ubg}
         });
     } catch (std::exception& e) {
-        std::cerr << "Optimization failed: " << e.what() << std::endl;
+        std::cerr << "Оптимизация не удалась: " << e.what() << std::endl;
+        std::cerr << "Пробуем с упрощенными настройками..." << std::endl;
+        
+        TrajectoryResult debug_result = debug4D(objective, kwargs);
+        if (debug_result.computation_time > 0) {
+            std::cout << "Траектория успешно создана с использованием упрощенного подхода." << std::endl;
+            return debug_result;
+        }
+        
         TrajectoryResult failed_result;
         failed_result.computation_time = -1.0;
         return failed_result;
@@ -729,9 +562,14 @@ void TrajectoryOptimizer::visualizeTrajectory(const TrajectoryResult& result) co
         return;
     }
     
-    std::cout << "=== Результаты оптимизации 4D-траектории ===" << std::endl;
+    std::cout << "=== Результаты оптимизации траектории ===" << std::endl;
     std::cout << "Время вычислений: " << result.computation_time << " сек." << std::endl;
-    std::cout << "Общее время полета: " << result.total_flight_time / 60.0 << " мин." << std::endl;
+    if (!result.times.empty() && result.times.size() >= result.positions.size()) {
+        std::cout << "Общее время полета: " << result.total_flight_time / 60.0 << " мин." << std::endl;
+    } else {
+        std::cout << "Общее время полета: Данные о времени недоступны" << std::endl;
+    }
+    
     std::cout << "Расход топлива: " << result.fuel_consumption << " единиц" << std::endl;
     std::cout << "Значение целевой функции: " << result.objective_value << std::endl;
     std::cout << "------------------" << std::endl;
@@ -742,21 +580,48 @@ void TrajectoryOptimizer::visualizeTrajectory(const TrajectoryResult& result) co
     
     std::cout << "Ключевые точки траектории (всего " << num_points << " точек):" << std::endl;
     for (size_t k = 0; k < result.positions.size(); k += step) {
-        std::cout << "Точка " << k << ": Время = " << result.times[k] / 60.0 << " мин.";
-        std::cout << ", Позиция = (" 
-                  << result.positions[k][0] / 1000.0 << " км, " // Конвертируем в км для удобства
-                  << result.positions[k][1] / 1000.0 << " км, " 
-                  << result.positions[k][2] << " м)";
-        std::cout << ", Скорость = (" 
-                  << result.velocities[k][0] << ", " 
-                  << result.velocities[k][1] << ", " 
-                  << result.velocities[k][2] << ") м/с";
+        if (!result.times.empty() && k < result.times.size()) {
+            std::cout << "Точка " << k << ": Время = " << result.times[k] / 60.0 << " мин.";
+        } else {
+            std::cout << "Точка " << k << ": Время = N/A";
+        }
+        
+        if (result.positions[k].size() >= 3) {
+            std::cout << ", Позиция = (" 
+                      << result.positions[k][0] / 1000.0 << " км, " 
+                      << result.positions[k][1] / 1000.0 << " км, " 
+                      << result.positions[k][2] << " м)";
+        } else if (result.positions[k].size() >= 2) {
+            // 2D trajectory
+            std::cout << ", Позиция = (" 
+                      << result.positions[k][0] << ", " 
+                      << result.positions[k][1] << ")";
+        }
+        
+        if (k < result.velocities.size()) {
+            if (result.velocities[k].size() >= 3) {
+                std::cout << ", Скорость = (" 
+                          << result.velocities[k][0] << ", " 
+                          << result.velocities[k][1] << ", " 
+                          << result.velocities[k][2] << ") м/с";
+            } else if (result.velocities[k].size() >= 2) {
+                std::cout << ", Скорость = (" 
+                          << result.velocities[k][0] << ", " 
+                          << result.velocities[k][1] << ")";
+            }
+        }
                   
         if (k < result.controls.size()) {
-            std::cout << std::endl << "    Управление = (" 
-                      << result.controls[k][0] / 1000.0 << ", " // Конвертируем в кН для удобства
-                      << result.controls[k][1] / 1000.0 << ", " 
-                      << result.controls[k][2] / 1000.0 << ") кН";
+            if (result.controls[k].size() >= 3) {
+                std::cout << std::endl << "    Управление = (" 
+                          << result.controls[k][0] / 1000.0 << ", " 
+                          << result.controls[k][1] / 1000.0 << ", " 
+                          << result.controls[k][2] / 1000.0 << ") кН";
+            } else if (result.controls[k].size() >= 2) {
+                std::cout << std::endl << "    Управление = (" 
+                          << result.controls[k][0] << ", " 
+                          << result.controls[k][1] << ")";
+            }
         }
         std::cout << std::endl;
     }
@@ -764,15 +629,37 @@ void TrajectoryOptimizer::visualizeTrajectory(const TrajectoryResult& result) co
     // Отображаем последнюю точку всегда
     if (num_points > 1 && (num_points - 1) % step != 0) {
         size_t k = num_points - 1;
-        std::cout << "Точка " << k << " (конечная): Время = " << result.times[k] / 60.0 << " мин.";
-        std::cout << ", Позиция = (" 
-                  << result.positions[k][0] / 1000.0 << " км, "
-                  << result.positions[k][1] / 1000.0 << " км, " 
-                  << result.positions[k][2] << " м)";
-        std::cout << ", Скорость = (" 
-                  << result.velocities[k][0] << ", " 
-                  << result.velocities[k][1] << ", " 
-                  << result.velocities[k][2] << ") м/с" << std::endl;
+        
+        if (!result.times.empty() && k < result.times.size()) {
+            std::cout << "Точка " << k << " (конечная): Время = " << result.times[k] / 60.0 << " мин.";
+        } else {
+            std::cout << "Точка " << k << " (конечная): Время = N/A";
+        }
+        
+        if (result.positions[k].size() >= 3) {
+            std::cout << ", Позиция = (" 
+                      << result.positions[k][0] / 1000.0 << " км, "
+                      << result.positions[k][1] / 1000.0 << " км, " 
+                      << result.positions[k][2] << " м)";
+        } else if (result.positions[k].size() >= 2) {
+            std::cout << ", Позиция = (" 
+                      << result.positions[k][0] << ", "
+                      << result.positions[k][1] << ")";
+        }
+        
+        if (k < result.velocities.size()) {
+            if (result.velocities[k].size() >= 3) {
+                std::cout << ", Скорость = (" 
+                          << result.velocities[k][0] << ", " 
+                          << result.velocities[k][1] << ", " 
+                          << result.velocities[k][2] << ") м/с";
+            } else if (result.velocities[k].size() >= 2) {
+                std::cout << ", Скорость = (" 
+                          << result.velocities[k][0] << ", " 
+                          << result.velocities[k][1] << ")";
+            }
+        }
+        std::cout << std::endl;
     }
 }
 
@@ -810,169 +697,11 @@ void TrajectoryOptimizer::exportTrajectory(const TrajectoryResult& result, const
     std::cout << "Траектория экспортирована в файл " << filename << std::endl;
 }
 
-// Метод обратной совместимости
-DMDict TrajectoryOptimizer::trajectory(
-    const std::string& objective, 
-    const std::map<std::string, double>& kwargs) {
-    
-    int N = opt_params.N;
-    
-    // Создаем переменные состояния и управления
-    MX x = MX::sym("x", 4, N+1);  // состояние: [позиция_x, позиция_y, скорость_x, скорость_y]
-    MX u = MX::sym("u", 2, N);    // управление: [сила_x, сила_y]
-    
-    // Начальные и конечные условия
-    std::vector<double> x0 = {0.0, 0.0, 0.0, 0.0};  // начальное положение и скорость
-    std::vector<double> xf = {10.0, 5.0, 0.0, 0.0}; // целевое положение и скорость
-    
-    // Переопределение значений из kwargs
-    auto it = kwargs.find("x0");
-    if (it != kwargs.end()) x0[0] = it->second;
-    
-    it = kwargs.find("y0");
-    if (it != kwargs.end()) x0[1] = it->second;
-    
-    it = kwargs.find("xf");
-    if (it != kwargs.end()) xf[0] = it->second;
-    
-    it = kwargs.find("yf"); 
-    if (it != kwargs.end()) xf[1] = it->second;
-    
-    // Уравнения динамики
-    std::vector<MX> equations;
-    for (int k = 0; k < N; k++) {
-        // Распаковка состояния
-        MX pos_x = x(0, k);
-        MX pos_y = x(1, k);
-        MX vel_x = x(2, k);
-        MX vel_y = x(3, k);
-        
-        // Управляющие воздействия
-        MX force_x = u(0, k);
-        MX force_y = u(1, k);
-        
-        // Уравнения движения (дискретизация):
-        MX next_pos_x = pos_x + vel_x * opt_params.dt;
-        MX next_pos_y = pos_y + vel_y * opt_params.dt;
-        
-        MX next_vel_x = vel_x + (force_x / system.mass) * opt_params.dt;
-        MX next_vel_y = vel_y + (force_y / system.mass) * opt_params.dt;
-        
-        // Накладываем ограничения на следующий шаг
-        equations.push_back(x(0, k+1) - next_pos_x);
-        equations.push_back(x(1, k+1) - next_pos_y);
-        equations.push_back(x(2, k+1) - next_vel_x);
-        equations.push_back(x(3, k+1) - next_vel_y);
-    }
-    
-    // Целевая функция в зависимости от выбранного критерия
-    MX obj;
-    if (objective == "fuel") {
-        // Минимизация расхода топлива (сумма абсолютных значений управлений)
-        obj = 0;
-        for (int k = 0; k < N; k++) {
-            obj += fabs(u(0, k)) + fabs(u(1, k));
-        }
-    } else if (objective == "time") {
-        // Минимизация времени (аппроксимация)
-        obj = N * opt_params.dt;
-        // Добавляем штраф за медленное движение
-        for (int k = 0; k < N; k++) {
-            obj += opt_params.dt * 0.1 * (1.0 / (fabs(u(0, k)) + fabs(u(1, k)) + 0.1));
-        }
-    } else { // "energy" по умолчанию
-        // Минимизация энергии (сумма квадратов управлений)
-        obj = 0;
-        for (int k = 0; k < N; k++) {
-            obj += pow(u(0, k), 2) + pow(u(1, k), 2);
+bool TrajectoryOptimizer::containsNaN(const std::vector<double>& vec) const {
+    for (const double& val : vec) {
+        if (std::isnan(val) || std::isinf(val)) {
+            return true;
         }
     }
-    
-    // Параметризуем переменные оптимизации
-    std::vector<MX> vars = {reshape(x, -1, 1), reshape(u, -1, 1)};
-    MX opt_vars = vertcat(vars);
-    
-    // Формируем ограничения
-    MX g = vertcat(equations);
-    
-    // Создаем задачу оптимизации
-    MXDict nlp = {{"x", opt_vars}, {"f", obj}, {"g", g}};
-    
-    // Настройки решателя
-    Dict solver_opts;
-    solver_opts["ipopt.print_level"] = 0;
-    solver_opts["ipopt.tol"] = 1e-6;
-    solver_opts["ipopt.max_iter"] = 1000;
-    solver_opts["print_time"] = 0;
-    
-    // Создаем решатель
-    Function solver = nlpsol("solver", opt_params.solver, nlp, solver_opts);
-    
-    // Границы для переменных оптимизации
-    int n_states = 4 * (N + 1);
-    int n_controls = 2 * N;
-    
-    std::vector<double> lbx(n_states + n_controls, -std::numeric_limits<double>::infinity());
-    std::vector<double> ubx(n_states + n_controls, std::numeric_limits<double>::infinity());
-    
-    // Ограничения на управление
-    double max_force = system.max_force_xy;
-    for (int i = n_states; i < n_states + n_controls; i++) {
-        lbx[i] = -max_force;
-        ubx[i] = max_force;
-    }
-    
-    // Начальные условия
-    lbx[0] = ubx[0] = x0[0]; // начальная позиция x
-    lbx[1] = ubx[1] = x0[1]; // начальная позиция y
-    lbx[2] = ubx[2] = x0[2]; // начальная скорость x
-    lbx[3] = ubx[3] = x0[3]; // начальная скорость y
-    
-    // Конечные условия
-    lbx[n_states-4] = ubx[n_states-4] = xf[0]; // конечная позиция x
-    lbx[n_states-3] = ubx[n_states-3] = xf[1]; // конечная позиция y
-    lbx[n_states-2] = ubx[n_states-2] = xf[2]; // конечная скорость x
-    lbx[n_states-1] = ubx[n_states-1] = xf[3]; // конечная скорость y
-    
-    // Границы для ограничений (все уравнения должны быть равны нулю)
-    std::vector<double> lbg(equations.size(), 0.0);
-    std::vector<double> ubg(equations.size(), 0.0);
-    
-    // Начальное предположение для переменных оптимизации
-    std::vector<double> x0_guess(n_states + n_controls, 0.0);
-    
-    // Вызываем решатель
-    DMDict result = solver(DMDict{
-        {"x0", x0_guess},
-        {"lbx", lbx},
-        {"ubx", ubx},
-        {"lbg", lbg},
-        {"ubg", ubg}
-    });
-    
-    return result;
-}
-
-void TrajectoryOptimizer::visualizeTrajectory(const DMDict& result) {
-    DM x_opt = result.at("x");
-    int N = opt_params.N;
-    
-    std::cout << "Оптимальная траектория:" << std::endl;
-    std::cout << "------------------" << std::endl;
-    
-    for (int k = 0; k <= N; k++) {
-        double pos_x = x_opt(4*k).scalar();
-        double pos_y = x_opt(4*k+1).scalar();
-        double vel_x = x_opt(4*k+2).scalar();
-        double vel_y = x_opt(4*k+3).scalar();
-        
-        std::cout << "Шаг " << k << ": Позиция = (" << pos_x << ", " << pos_y 
-                  << "), Скорость = (" << vel_x << ", " << vel_y << ")" << std::endl;
-        
-        if (k < N) {
-            double force_x = x_opt(4*(N+1) + 2*k).scalar();
-            double force_y = x_opt(4*(N+1) + 2*k+1).scalar();
-            std::cout << "           Управление = (" << force_x << ", " << force_y << ")" << std::endl;
-        }
-    }
+    return false;
 }

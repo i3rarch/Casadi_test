@@ -29,12 +29,16 @@ Function TrajectoryOptimizer::createSolver4D(const MX& x, const MX& u, const MX&
     int N = opt_params.N;
     double mass = system.mass;
     
+    // Защита от деления на ноль
+    if (fabs(mass) < 1e-6) {
+        mass = 80000.0; // Значение по умолчанию
+    }
+    
     // Уравнения динамики
     std::vector<MX> equations;
     
-    // Временные шаги могут быть переменными для оптимизации времени полета
     for (int k = 0; k < N; k++) {
-        // Распаковка состояния: позиция (x,y,z) и скорость (vx,vy,vz)
+        // Распаковка состояния
         MX pos_x = x(0, k);
         MX pos_y = x(1, k);
         MX pos_z = x(2, k);
@@ -47,19 +51,20 @@ Function TrajectoryOptimizer::createSolver4D(const MX& x, const MX& u, const MX&
         MX force_y = u(1, k);
         MX force_z = u(2, k);
         
-        // Временной шаг между точками k и k+1
+        // Временной шаг
         MX dt = t(k);
         
-        // Уравнения движения самолета (упрощенная модель)
-        MX next_pos_x = pos_x + vel_x * dt;
-        MX next_pos_y = pos_y + vel_y * dt;
-        MX next_pos_z = pos_z + vel_z * dt;
+        // Уравнения движения с ограниченным временным шагом
+        MX safe_dt = fmax(dt, 1.0); // Минимум 1 секунда
         
-        MX next_vel_x = vel_x + (force_x / mass) * dt;
-        MX next_vel_y = vel_y + (force_y / mass) * dt;
-        MX next_vel_z = vel_z + (force_z / mass) * dt - 9.81 * dt; // С учетом гравитации
+        MX next_pos_x = pos_x + vel_x * safe_dt;
+        MX next_pos_y = pos_y + vel_y * safe_dt;
+        MX next_pos_z = pos_z + vel_z * safe_dt;
         
-        // Ограничения на следующие значения
+        MX next_vel_x = vel_x + (force_x / mass) * safe_dt;
+        MX next_vel_y = vel_y + (force_y / mass) * safe_dt;
+        MX next_vel_z = vel_z + (force_z / mass) * safe_dt - 9.81 * safe_dt;
+        
         equations.push_back(x(0, k+1) - next_pos_x);
         equations.push_back(x(1, k+1) - next_pos_y);
         equations.push_back(x(2, k+1) - next_pos_z);
@@ -68,36 +73,39 @@ Function TrajectoryOptimizer::createSolver4D(const MX& x, const MX& u, const MX&
         equations.push_back(x(5, k+1) - next_vel_z);
     }
     
-    // Дополнительные ограничения для воздушного пространства
+    // Ограничения воздушного пространства
     std::vector<MX> airspace_constraints;
     
-    // Время начала траектории
     MX current_time = 0;
-    
-    // Проверяем все ограничения воздушного пространства
-    for (int k = 0; k < N; k++) {
-        // Текущее время в точке k
+    for (int k = 0; k <= N; k++) {
         if (k > 0) {
-            current_time = current_time + t(k-1);
+            current_time = current_time + fmax(t(k-1), 1.0);
         }
         
         MX pos_x = x(0, k);
         MX pos_y = x(1, k);
         MX pos_z = x(2, k);
         
-        // Ограничения на высоту полета
-        airspace_constraints.push_back(pos_z - system.min_altitude); // Высота должна быть >= min_altitude
-        airspace_constraints.push_back(system.max_altitude - pos_z); // Высота должна быть <= max_altitude
+        // Базовые ограничения
+        airspace_constraints.push_back(pos_z - system.min_altitude);
+        airspace_constraints.push_back(system.max_altitude - pos_z);
         
-        // Ограничения скорости
-        MX speed = sqrt(pow(x(3, k), 2) + pow(x(4, k), 2) + pow(x(5, k), 2));
-        airspace_constraints.push_back(system.max_speed - speed); // Скорость должна быть <= max_speed
+        // Ограничения скорости с защитой от деления на ноль
+        MX speed_squared = pow(x(3, k), 2) + pow(x(4, k), 2) + pow(x(5, k), 2);
+        MX speed = sqrt(speed_squared + 1e-6); // Добавляем малое число для численной стабильности
+        airspace_constraints.push_back(system.max_speed - speed);
         
-        // Применяем все активные ограничения воздушного пространства
+        // Пользовательские ограничения
         for (const auto& constraint : constraints) {
             if (!constraint.is_active) continue;
             
-            airspace_constraints.push_back(createDistanceConstraint(pos_x, pos_y, pos_z, constraint, current_time));
+            try {
+                MX constraint_val = createDistanceConstraint(pos_x, pos_y, pos_z, constraint, current_time);
+                airspace_constraints.push_back(constraint_val);
+            } catch (...) {
+                // Если ограничение вызывает ошибку, пропускаем его
+                std::cerr << "Предупреждение: пропуск ограничения из-за ошибки" << std::endl;
+            }
         }
     }
     
@@ -181,9 +189,63 @@ MX TrajectoryOptimizer::createDistanceConstraint(const MX& pos_x, const MX& pos_
                                             const AirspaceConstraint& constraint, const MX& time) {
     switch (constraint.constraint_type) {
         case AirspaceConstraintType::SPHERE: {
+            // Параметры: [center_x, center_y, center_z, radius]
+            double cx = constraint.parameters[0];
+            double cy = constraint.parameters[1];
+            double cz = constraint.parameters[2];
+            double radius = constraint.parameters[3];
+            
+            // Расстояние от точки до центра сферы
+            MX dist_to_center = sqrt(pow(pos_x - cx, 2) + pow(pos_y - cy, 2) + pow(pos_z - cz, 2));
+            
+            // Ограничение: должно быть вне сферы (расстояние > радиуса)
+            MX constraint_value = dist_to_center - radius;
+            
+            // Добавляем временные ограничения
+            double t_start = constraint.start_time;
+            double t_end = constraint.end_time;
+            double t_margin = 60.0; // 1 минута плавного перехода
+            
+            MX start_factor = 0.5 * (1 + tanh((time - t_start) / t_margin));
+            MX end_factor = 0.5 * (1 + tanh((t_end - time) / t_margin));
+            MX time_factor = start_factor * end_factor;
+            
+            // Если ограничение неактивно по времени, возвращаем большое положительное значение
+            return time_factor * constraint_value + (1.0 - time_factor) * MX(1000.0);
         }
         
         case AirspaceConstraintType::CYLINDER: {
+            // Параметры: [center_x, center_y, min_z, max_z, radius]
+            double cx = constraint.parameters[0];
+            double cy = constraint.parameters[1];
+            double min_z = constraint.parameters[2];
+            double max_z = constraint.parameters[3];
+            double radius = constraint.parameters[4];
+            
+            // Расстояние от точки до оси цилиндра (в плоскости XY)
+            MX dist_to_axis = sqrt(pow(pos_x - cx, 2) + pow(pos_y - cy, 2));
+            
+            // Проверка нахождения в высотном диапазоне цилиндра
+            double smooth_factor = 10.0;
+            MX in_height_range = (0.5 * (1 + tanh(smooth_factor * (pos_z - min_z)))) * 
+                                (0.5 * (1 - tanh(smooth_factor * (pos_z - max_z))));
+            
+            // Ограничение: должно быть вне цилиндра
+            MX radial_constraint = dist_to_axis - radius;
+            
+            // Комбинированное ограничение
+            MX constraint_value = in_height_range * radial_constraint + (1.0 - in_height_range) * MX(1000.0);
+            
+            // Добавляем временные ограничения
+            double t_start = constraint.start_time;
+            double t_end = constraint.end_time;
+            double t_margin = 60.0;
+            
+            MX start_factor = 0.5 * (1 + tanh((time - t_start) / t_margin));
+            MX end_factor = 0.5 * (1 + tanh((t_end - time) / t_margin));
+            MX time_factor = start_factor * end_factor;
+            
+            return time_factor * constraint_value + (1.0 - time_factor) * MX(1000.0);
         }
         
         case AirspaceConstraintType::CORRIDOR: {
@@ -263,7 +325,7 @@ MX TrajectoryOptimizer::createDistanceConstraint(const MX& pos_x, const MX& pos_
         }
         
         default:
-            return MX(1.0);
+            return MX(1000.0); // Большое положительное значение для неопределенных ограничений
     }
 }
 
@@ -358,7 +420,7 @@ TrajectoryResult TrajectoryOptimizer::optimize4D(
     // Границы для переменных оптимизации
     int n_states = 6 * (N + 1);     // 6 состояний на каждом шаге
     int n_controls = 3 * N;         // 3 управления на каждом шаге
-    int n_times = N;                // N временных шагов
+    int n_times = N;                // N временные шаги
     
     std::vector<double> lbx(n_states + n_controls + n_times, -std::numeric_limits<double>::infinity());
     std::vector<double> ubx(n_states + n_controls + n_times, std::numeric_limits<double>::infinity());

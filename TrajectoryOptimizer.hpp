@@ -8,6 +8,8 @@
 #include <iomanip>
 #include <memory>
 #include <fstream>
+#include <chrono>  
+#include <limits>  
 
 using namespace casadi;
 
@@ -178,7 +180,6 @@ public:
     
     TrajectoryResult debug4D(const std::string& objective = "fuel",
                             const std::map<std::string, double>& kwargs = {}) {
-        std::cout << "Запуск отладки оптимизации 4D-траектории..." << std::endl;
         
         int N = 10; 
         
@@ -188,8 +189,8 @@ public:
         
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        MX x = MX::sym("x", 6, N+1);  // состояние: [pos_x, pos_y, pos_z, vel_x, vel_y, vel_z]
-        MX u = MX::sym("u", 3, N);    // управление: [force_x, force_y, force_z]
+        MX x = MX::sym("x", 6, N+1);
+        MX u = MX::sym("u", 3, N);
         
         std::vector<double> x0 = {0.0, 0.0, 3000.0, 0.0, 0.0, 0.0};
         std::vector<double> xf = {100000.0, 80000.0, 5000.0, 0.0, 0.0, 0.0};
@@ -203,8 +204,7 @@ public:
             else if (kv.first == "zf") xf[2] = kv.second;
         }
         
-        std::cout << "Настройка уравнений..." << std::endl;
-        
+        // Построение уравнений без отладочных сообщений
         std::vector<MX> equations;
         for (int k = 0; k < N; k++) {
             MX pos_x = x(0, k);
@@ -219,7 +219,6 @@ public:
             MX force_z = u(2, k);
             
             double dt = opt_params.dt;
-            
             double mass = system.mass;
             if (fabs(mass) < 1e-6) mass = 1e-6;
             
@@ -239,38 +238,30 @@ public:
             equations.push_back(x(5, k+1) - next_vel_z);
         }
         
-        std::cout << "Настройка целевой функции..." << std::endl;
-        
+        // Целевая функция
         MX obj;
         if (objective == "fuel" || objective == "energy") {
             obj = 0;
             for (int k = 0; k < N; k++) {
                 obj += pow(u(0, k), 2) + pow(u(1, k), 2) + pow(u(2, k), 2);
             }
-        } else { // time or balanced
+        } else {
             obj = N * opt_params.dt;
         }
         
-        std::cout << "Создание NLP-задачи..." << std::endl;
-        
         std::vector<MX> vars = {reshape(x, -1, 1), reshape(u, -1, 1)};
         MX opt_vars = vertcat(vars);
-        
         MX g = vertcat(equations);
-        
         MXDict nlp = {{"x", opt_vars}, {"f", obj}, {"g", g}};
         
-        std::cout << "Настройка параметров решателя..." << std::endl;
-        
+        // Тихие настройки решателя
         Dict solver_opts;
-        solver_opts["ipopt.print_level"] = 5; 
+        solver_opts["ipopt.print_level"] = 0;  // Отключаем вывод IPOPT
         solver_opts["ipopt.tol"] = 1e-3;       
         solver_opts["ipopt.max_iter"] = 500;   
         solver_opts["ipopt.acceptable_tol"] = 1e-2;
-        solver_opts["print_time"] = 1;
-        
-        std::cout << "Создание решателя..." << std::endl;
-        
+        solver_opts["print_time"] = 0;         // Отключаем вывод времени
+
         Function solver = nlpsol("solver", opt_params.solver, nlp, solver_opts);
         
         int n_states = 6 * (N + 1);
@@ -306,11 +297,11 @@ public:
             }
         }
         
-        std::cout << "Решение задачи оптимизации..." << std::endl;
+        TrajectoryResult traj_result;
         
-        // Call solver
-        DMDict result;
         try {
+            // Call solver
+            DMDict result;
             result = solver(DMDict{
                 {"x0", x0_guess},
                 {"lbx", lbx},
@@ -319,23 +310,10 @@ public:
                 {"ubg", ubg}
             });
             
-            std::cout << "Optimization complete!" << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to solve: " << e.what() << std::endl;
-            // Restore original parameters
-            opt_params = saved_params;
-            TrajectoryResult failed_result;
-            failed_result.computation_time = -1.0;
-            return failed_result;
-        }
-        
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        
-        // Extract results
-        TrajectoryResult traj_result;
-        
-        try {
+            // Измеряем время после решения
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            
             // Get optimization result
             DM x_opt = result.at("x");
             
@@ -371,13 +349,16 @@ public:
             traj_result.objective_value = result.at("f").scalar();
             traj_result.computation_time = duration.count() / 1000.0;
             traj_result.total_flight_time = traj_result.times.back();
+            traj_result.fuel_consumption = 0.0; // Простой расчет можно добавить позже
             
-            std::cout << "Results extracted successfully!" << std::endl;
         } catch (const std::exception& e) {
-            std::cerr << "Error extracting results: " << e.what() << std::endl;
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            
+            traj_result.computation_time = -1.0; // Индикатор ошибки
+            std::cerr << "Error in debug4D: " << e.what() << std::endl;
         }
         
-        // Restore original parameters
         opt_params = saved_params;
         return traj_result;
     }
@@ -385,4 +366,5 @@ public:
     // Accessor methods for system and optimization parameters
     const SystemParams& getSystemParams() const { return system; }
     const OptimizationParams& getOptimizationParams() const { return opt_params; }
+    const std::vector<AirspaceConstraint>& getConstraints() const { return constraints; }
 };
